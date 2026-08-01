@@ -1,0 +1,41 @@
+# Copy to .github/workflows/project-sync.yml in your target repo.
+#
+# Event-driven half of the docs <-> GitHub Project sync. The reconciler (reconcile.mjs, run by hand)
+# manages the Todo <-> In progress band; this workflow advances items to the deploy line
+# ("Deployed to Dev") when your deploy workflow succeeds on the integration branch.
+#
+# Later columns ("Ready for prod", "Done") are set MANUALLY — a deliberate release signal.
+# Items advance FORWARD only (never moved back).
+#
+# EDIT THE 3 PLACEHOLDERS below: <deploy-workflow-name>, <integration-branch>, and the path to
+# advance.mjs (vendor the script into the repo, or install this plugin on the runner).
+#
+# REQUIRES a repo/org secret PROJECTS_TOKEN — a token with `project` scope. The default GITHUB_TOKEN
+# cannot write org Projects v2, so without this secret the advance step is a safe no-op.
+
+name: Project Sync
+
+on:
+  workflow_run:
+    workflows: ["<deploy-workflow-name>"] # e.g. "Build and deploy Node.js app to Azure Web App"
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  advance:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == '<integration-branch>'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Advance linked issues -> Deployed to Dev
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_TOKEN }}
+        # Point this at wherever advance.mjs lives (vendored path shown):
+        run: node scripts/gh-project-sync/advance.mjs --column "Deployed to Dev" --sha "${{ github.event.workflow_run.head_sha }}"

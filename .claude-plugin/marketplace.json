@@ -1,0 +1,15 @@
+{
+  "name": "sachio-tooling",
+  "owner": { "name": "Sachio Ross" },
+  "metadata": {
+    "description": "Personal reusable Claude Code tooling.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "gh-project-sync",
+      "source": "./",
+      "description": "Keep markdown planning docs and a GitHub Project (v2) board in a consistent, idempotent state, joined by a stable id."
+    }
+  ]
+}
