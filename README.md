@@ -31,11 +31,11 @@ column mapping, grouping field — is set in a per-repo `gh-project-sync.config.
 **As a plugin (recommended):** add this repo as a marketplace, then install:
 
 ```
-/plugin marketplace add /Users/sachio/clients/tooling/gh-project-sync
+/plugin marketplace add sachioross/claude-gh-project-sync
 /plugin install gh-project-sync@sachio-tooling
 ```
 
-(or point the marketplace at the git remote once you push it.)
+(a local path — `/plugin marketplace add /path/to/claude-gh-project-sync` — also works for a checkout.)
 
 **Or vendor the scripts:** copy `scripts/*.mjs` into a target repo (e.g. `scripts/gh-project-sync/`) and
 run them directly.
