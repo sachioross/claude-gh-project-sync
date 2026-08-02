@@ -1,0 +1,26 @@
+{
+  "_comment": "Copy this to your repo root as gh-project-sync.config.json and edit. Only owner/repo/projectNumber/storyDir are required; everything else defaults to the BMAD-shaped values shown here.",
+
+  "owner": "your-org",
+  "repo": "your-org/your-repo",
+  "projectNumber": 6,
+  "projectTitle": "2026 H2",
+
+  "storyDir": "_bmad-output/implementation-artifacts",
+  "sprintStatusFile": "_bmad-output/implementation-artifacts/sprint-status.yaml",
+
+  "markerLabel": "sync-id",
+
+  "knownStatus": ["backlog", "ready-for-dev", "in-progress", "review", "done", "superseded", "blocked"],
+  "statusToColumn": {
+    "backlog": "Todo",
+    "ready-for-dev": "Todo",
+    "in-progress": "In progress",
+    "review": "In progress"
+  },
+  "columnRank": { "Todo": 0, "In progress": 1, "Deployed to Dev": 2, "Ready for prod": 3, "Done": 4 },
+  "deployLine": "Deployed to Dev",
+  "skipCreateStatus": ["done", "superseded"],
+
+  "groupField": { "name": "Epic", "labelPrefix": "Epic ", "idPattern": "^(\\d+)-" }
+}

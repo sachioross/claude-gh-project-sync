@@ -276,6 +276,24 @@ function setGroup(projectId, itemId, groupField, groupVal) {
   gh(["project", "item-edit", "--project-id", projectId, "--id", itemId, "--field-id", groupField.id, "--single-select-option-id", opt]);
 }
 
+// Add a freshly-created issue to the project and return its item id.
+// A project with a built-in "auto-add to project" workflow can land the issue on the board before we
+// get here; item-add then fails with "Content already exists in this project". That's a race, not an
+// error — fall back to resolving the item id the auto-add already created.
+function addToProject(url, number) {
+  try {
+    const added = gh(["project", "item-add", String(CFG.projectNumber), "--owner", CFG.owner, "--url", url, "--format", "json"], { json: true });
+    if (added.id) return added.id;
+  } catch (err) {
+    if (!/already exists in this project/i.test(String(err.stderr || err.message || ""))) throw err;
+    console.log(`  note: #${number} was already on the board (project auto-add) — resolving its item id`);
+  }
+  const items = gh(["project", "item-list", String(CFG.projectNumber), "--owner", CFG.owner, "--format", "json", "-L", "500"], { json: true }).items;
+  const found = items.find((it) => it.content?.type === "Issue" && it.content.number === number);
+  if (!found?.id) throw new Error(`#${number} was neither added to nor found in project ${CFG.projectNumber}`);
+  return found.id;
+}
+
 function doCreate(p, projectId, statusField, groupField) {
   const s = p.s;
   const body = [
@@ -292,9 +310,7 @@ function doCreate(p, projectId, statusField, groupField) {
   const url = m[0];
   const number = Number(m[1]);
   console.log(`created #${number} for ${s.syncId} — ${url}`);
-  const added = gh(["project", "item-add", String(CFG.projectNumber), "--owner", CFG.owner, "--url", url, "--format", "json"], { json: true });
-  const itemId = added.id;
-  if (!itemId) throw new Error(`item-add returned no id for #${number}: ${JSON.stringify(added)}`);
+  const itemId = addToProject(url, number);
   setStatus(projectId, itemId, statusField, p.wantColumn || "Todo");
   setGroup(projectId, itemId, groupField, s.group);
   writeIssueLine(s, number);

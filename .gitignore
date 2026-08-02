@@ -1,2 +1,5 @@
 node_modules/
-gh-project-sync.config.json
+
+# a real config, if this repo is ever synced against its own board. Root-anchored so it does NOT
+# swallow templates/gh-project-sync.config.json — a bare pattern matches at every depth.
+/gh-project-sync.config.json

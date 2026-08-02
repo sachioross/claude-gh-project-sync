@@ -1,6 +1,6 @@
 {
   "name": "gh-project-sync",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Reconcile markdown planning/story docs with a GitHub Project (v2) — a stable-id bridge, dry-run-first reconciler, and an event-driven deploy advancer. Config-driven; BMAD-shaped by default.",
   "author": { "name": "Sachio Ross" },
   "keywords": ["github-projects", "bmad", "planning", "sync", "issues", "board"]
