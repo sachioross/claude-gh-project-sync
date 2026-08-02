@@ -51,6 +51,35 @@ run them directly.
 
 See `skills/gh-project-sync/SKILL.md` for the full run guide.
 
+## Provision to a team
+
+To hand this plugin to everyone who opens a *different* project repo — without each teammate running
+`/plugin marketplace add` — commit this into that repo's **`.claude/settings.json`** (the shared,
+checked-in settings file, not `settings.local.json`):
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "sachio-tooling": {
+      "source": { "source": "github", "repo": "sachioross/claude-gh-project-sync" },
+      "autoUpdate": true
+    }
+  },
+  "enabledPlugins": {
+    "gh-project-sync@sachio-tooling": true
+  }
+}
+```
+
+- `extraKnownMarketplaces` is keyed by the **marketplace** name (from `marketplace.json`); its value is an
+  object with a nested `source` (`github` + `repo` shorthand shown; `url` / `git-subdir` / `npm` also work).
+- `enabledPlugins` is keyed by the exact `"plugin@marketplace"` string, mapped to a boolean.
+- On first trusting the repo folder, Claude Code **prompts** the teammate to install the marketplace; once
+  accepted, the enabled plugin auto-installs — no further command. A teammate opts out with
+  `"gh-project-sync@sachio-tooling": false` in their own `.claude/settings.local.json`.
+- Requires **Claude Code v2.1.195+** (the auto-prompt-on-trust behavior); older builds silently no-op and
+  need a manual `/plugin marketplace add`.
+
 ## Config reference
 
 Only `owner`, `repo`, `projectNumber`, `storyDir` are required. Notable optional keys:
