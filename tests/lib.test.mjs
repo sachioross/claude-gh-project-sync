@@ -21,3 +21,16 @@ describe("withDefaults", () => {
     assert.equal(c.projectTitle, "#2");
   });
 });
+
+describe("withDefaults — sources", () => {
+  it("wraps a single storyDir as one source labelled by its dir", () => {
+    const c = withDefaults({ storyDir: "stories", sprintStatusFile: "stories/s.yaml" });
+    assert.deepEqual(c.sources, [{ label: "stories", storyDir: "stories", sprintStatusFile: "stories/s.yaml" }]);
+  });
+  it("takes explicit sources as given", () => {
+    const c = withDefaults({ sources: [{ label: "app", storyDir: "a" }, { label: "api", storyDir: "../api/a", sprintStatusFile: "../api/s.yaml" }] });
+    assert.equal(c.sources.length, 2);
+    assert.equal(c.sources[0].sprintStatusFile, null);
+    assert.equal(c.sources[1].label, "api");
+  });
+});

@@ -1,7 +1,7 @@
 // Story enumeration and action resolution for reconcile.mjs.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mergeStories, decideAction } from "../scripts/reconcile.mjs";
+import { mergeStories, decideAction, combineStatusMaps } from "../scripts/reconcile.mjs";
 import { withDefaults } from "../scripts/lib.mjs";
 
 const cfg = withDefaults({ owner: "o", repo: "o/r", projectNumber: 6, projectTitle: "2026 H2", storyDir: "stories" });
@@ -105,5 +105,23 @@ describe("decideAction — the deploy line is a high-water mark", () => {
     const custom = withDefaults({ ...cfg, columnRank: { Backlog: 0, "In Progress": 1, "Deploy to Dev": 2, Done: 3 }, deployLine: "Deploy to Dev" });
     assert.equal(decideAction({ cfg: custom, story, linked: { number: 1, status: "Deploy to Dev" }, wantColumn: "In Progress" }).action, "hold");
     assert.equal(decideAction({ cfg: custom, story, linked: { number: 1, status: "Backlog" }, wantColumn: "In Progress" }).action, "reconcile");
+  });
+});
+
+describe("combineStatusMaps — several story trees, one board", () => {
+  it("unions the maps, first source winning", () => {
+    const { map } = combineStatusMaps([new Map([["1-1-a", "done"]]), new Map([["1-1-a", "review"], ["2-1-b", "backlog"]])]);
+    assert.equal(map.get("1-1-a"), "done");
+    assert.equal(map.get("2-1-b"), "backlog");
+  });
+  it("reports every id the sources disagree on, and only those", () => {
+    const { conflicts } = combineStatusMaps([
+      new Map([["5-13-x", "done"], ["7-4-y", "superseded"], ["3-1-z", "done"]]),
+      new Map([["5-13-x", "review"], ["7-4-y", "backlog"], ["3-1-z", "done"]]),
+    ]);
+    assert.deepEqual(conflicts, [
+      { id: "5-13-x", statuses: ["done", "review"] },
+      { id: "7-4-y", statuses: ["superseded", "backlog"] },
+    ]);
   });
 });

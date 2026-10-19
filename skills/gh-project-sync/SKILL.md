@@ -57,7 +57,8 @@ Run from the target repo root. `<plugin>` = this plugin's root (`${CLAUDE_PLUGIN
    `HOLD` = past the deploy line, or in a column the config doesn't know. `UNFILED` = in the status map
    but no doc and no linked issue (never auto-created — write the doc, or file the issue with the marker).
    `UNTRACKED` = a doc with no status (not a story; add it to the map if it is). Note any
-   `drift (map≠doc prose)` — that flags a status entry to fix — and any `columnRank` mismatch warning.
+   `drift (map≠doc prose)` — that flags a status entry to fix — any `columnRank` mismatch warning, and (with
+   several `sources`) any `status maps disagree` line: two status files drifting apart.
 
 2. **Apply**:
    ```

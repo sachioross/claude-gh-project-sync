@@ -99,10 +99,11 @@ checked-in settings file, not `settings.local.json`):
 
 ## Config reference
 
-Only `owner`, `repo`, `projectNumber`, `storyDir` are required. Notable optional keys:
+Only `owner`, `repo`, `projectNumber`, and `storyDir` (or `sources`) are required. Notable optional keys:
 
 | Key | Default | Meaning |
 |---|---|---|
+| `sources` | one, from `storyDir` + `sprintStatusFile` | Several story trees on one board: `[{ "label", "storyDir", "sprintStatusFile" }]`. First source wins a status disagreement; every disagreement is reported |
 | `sprintStatusFile` | none | Canonical status map (BMAD `sprint-status.yaml`); else the doc's `Status:` prose is used |
 | `markerLabel` | `sync-id` | The HTML-comment marker key stored in issue bodies |
 | `statusToColumn` | BMAD map | Which doc status maps to which reconciler-managed column |

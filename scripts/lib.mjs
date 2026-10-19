@@ -27,6 +27,13 @@ export const DEFAULTS = {
 export function withDefaults(raw) {
   const c = { ...DEFAULTS, ...raw };
   c.projectTitle = c.projectTitle || `#${c.projectNumber}`;
+  // `sources` lets one board span several story trees (e.g. an app repo and an api repo that each keep
+  // their own BMAD output). Without it, the single storyDir/sprintStatusFile pair is the only source.
+  c.sources = (c.sources || (c.storyDir ? [{ storyDir: c.storyDir, sprintStatusFile: c.sprintStatusFile }] : [])).map((src) => ({
+    label: src.label || src.storyDir,
+    storyDir: src.storyDir,
+    sprintStatusFile: src.sprintStatusFile || null,
+  }));
   return c;
 }
 
@@ -40,7 +47,8 @@ export function loadConfig(required) {
   }
   const c = withDefaults(JSON.parse(readFileSync(abs, "utf8")));
   for (const k of required) {
-    if (c[k] === undefined) { console.error(`gh-project-sync: config is missing required key "${k}"`); process.exit(1); }
+    const missing = k === "storyDir" ? !c.sources.length : c[k] === undefined;
+    if (missing) { console.error(`gh-project-sync: config is missing required key "${k === "storyDir" ? "storyDir (or sources)" : k}"`); process.exit(1); }
   }
   return c;
 }

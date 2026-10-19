@@ -75,6 +75,22 @@ export function mergeStories(fileStories, statusMap, { groupRe = /^(\d+)-/, roll
   return merged.sort((a, b) => a.syncId.localeCompare(b.syncId, undefined, { numeric: true }));
 }
 
+// Merge the status maps of several sources. The first source that declares an id wins, and every id the
+// sources disagree on is returned as a conflict — two yamls drifting apart is exactly the kind of silent
+// divergence the report exists to surface.
+export function combineStatusMaps(maps) {
+  const map = new Map();
+  const seen = new Map(); // id -> [status per declaring source]
+  for (const m of maps) {
+    for (const [id, status] of m) {
+      if (!map.has(id)) map.set(id, status);
+      seen.set(id, [...(seen.get(id) || []), status]);
+    }
+  }
+  const conflicts = [...seen].filter(([, ss]) => new Set(ss).size > 1).map(([id, ss]) => ({ id, statuses: ss }));
+  return { map, conflicts };
+}
+
 // Decide what this run would do about one story. Free of I/O so every branch can be asserted.
 export function decideAction({ story, linked, wantColumn, candidate, linkCandidates = false, cfg }) {
   const COLUMN_RANK = cfg.columnRank;
@@ -147,12 +163,12 @@ let KNOWN_STATUS;
 let MARKER;
 let MARKER_RE;
 
-// The optional sprint-status file is the CANONICAL machine-readable status source (a clean enum).
+// A source's sprint-status file is the CANONICAL machine-readable status source (a clean enum).
 // A doc's own `Status:` line is free-form prose, used only as an advisory fallback.
-function loadSprintStatus() {
+function loadSprintStatus(file) {
   const map = new Map();
-  if (!CFG.sprintStatusFile || !existsSync(CFG.sprintStatusFile)) return map;
-  const text = readFileSync(CFG.sprintStatusFile, "utf8");
+  if (!file || !existsSync(file)) return map;
+  const text = readFileSync(file, "utf8");
   for (const line of text.split("\n")) {
     const m = line.replace(/#.*/, "").match(/^\s+([\w-]+):\s*([a-z-]+)\s*$/);
     if (m && KNOWN_STATUS.has(m[2])) map.set(m[1], m[2]);
@@ -160,23 +176,29 @@ function loadSprintStatus() {
   return map;
 }
 
-function loadStoryFiles(sprint, groupRe) {
-  return readdirSync(CFG.storyDir)
+// A doc's status comes from the COMBINED map (first source wins), wherever the doc itself lives — one
+// precedence rule, the same one the conflict report names.
+function loadStoryFiles(source, statusMap, groupRe) {
+  if (!existsSync(source.storyDir)) {
+    console.warn(`  note: story dir ${source.storyDir} does not exist — source "${source.label}" contributes nothing`);
+    return [];
+  }
+  return readdirSync(source.storyDir)
     .filter((f) => f.endsWith(".md"))
     .map((f) => {
-      const path = join(CFG.storyDir, f);
+      const path = join(source.storyDir, f);
       const text = readFileSync(path, "utf8");
       const syncId = f.replace(/\.md$/, "");
       const group = (syncId.match(groupRe) || [])[1] || "?";
       const title = (text.match(/^#\s+(.+)$/m) || [])[1]?.trim() || syncId;
       const prose = (text.match(/^Status:\s*(.+)$/m) || [])[1]?.trim() || "";
       const proseStatus = normalizeProse(prose, KNOWN_STATUS);
-      const mapStatus = sprint.get(syncId) || null;
+      const mapStatus = statusMap.get(syncId) || null;
       const status = mapStatus || proseStatus || "unknown";
-      const source = mapStatus ? "map" : proseStatus ? "doc" : "none";
+      const src = mapStatus ? "map" : proseStatus ? "doc" : "none";
       const drift = mapStatus && proseStatus && mapStatus !== proseStatus ? `${mapStatus}≠${proseStatus}` : null;
       const issue = (text.match(/^Issue:\s*#?(\d+)/m) || [])[1];
-      return { syncId, group, title, status, source, drift, prose, issue: issue ? Number(issue) : null, path, hasFile: true };
+      return { syncId, group, title, status, source: src, drift, prose, issue: issue ? Number(issue) : null, path, docLabel: `${source.label}/${f}`, hasFile: true };
     });
 }
 
@@ -207,8 +229,20 @@ function main() {
   const EXECUTE = args.has("--execute");
   const LINK_CANDIDATES = args.has("--link-candidates");
 
-  const sprint = loadSprintStatus();
-  const stories = mergeStories(loadStoryFiles(sprint, groupRe), sprint, { groupRe, rollupRe });
+  const sourceMaps = CFG.sources.map((src) => loadSprintStatus(src.sprintStatusFile));
+  const { map: sprint, conflicts } = combineStatusMaps(sourceMaps);
+  // The same doc in two sources: the first source's copy wins, the duplicate is reported.
+  const fileStories = [];
+  const dupDocs = [];
+  const seenDocs = new Set();
+  CFG.sources.forEach((src) => {
+    for (const f of loadStoryFiles(src, sprint, groupRe)) {
+      if (seenDocs.has(f.syncId)) { dupDocs.push(f.docLabel); continue; }
+      seenDocs.add(f.syncId);
+      fileStories.push(f);
+    }
+  });
+  const stories = mergeStories(fileStories, sprint, { groupRe, rollupRe });
   const fields = fetchFields(CFG);
   const items = fetchBoardItems(CFG);
   const projectId = fetchProjectId(CFG);
@@ -260,11 +294,18 @@ function main() {
   console.log("-".repeat(120));
   console.log("summary:", Object.entries(counts).map(([k, v]) => `${k}=${v}`).join("  "));
   if (drifts.length) console.log(`drift (map≠doc prose): ${drifts.join(", ")}`);
+  if (conflicts.length) {
+    console.log(
+      `\n⚠️ status maps disagree (${conflicts.length}) — first source wins (${CFG.sources.map((x) => x.label).join(" > ")}): ` +
+        conflicts.map((c) => `${c.id} (${c.statuses.join("≠")})`).join(", "),
+    );
+  }
+  if (dupDocs.length) console.log(`\nduplicate docs ignored (an earlier source has the same id): ${dupDocs.join(", ")}`);
   const unfiled = plan.filter((p) => p.action === "unfiled").map((p) => p.s.syncId);
   if (unfiled.length) {
     console.log(`\nunfiled (${unfiled.length}) — in the status map, no doc, no linked issue: ${unfiled.join(", ")}`);
     console.log(
-      `  NOT on the board. Write ${CFG.storyDir}/<id>.md, or file the issue on "${CFG.projectTitle}" with ` +
+      `  NOT on the board. Write <id>.md in a story dir (${CFG.sources.map((x) => x.storyDir).join(", ")}), or file the issue on "${CFG.projectTitle}" with ` +
         `<!-- ${CFG.markerLabel}: <id> --> in its body.`,
     );
   }
@@ -350,7 +391,7 @@ function doCreate(p, projectId, statusField, groupField) {
   const body = [
     MARKER(s.syncId),
     "",
-    `**Planning doc:** \`${CFG.storyDir}/${s.syncId}.md\``,
+    `**Planning doc:** \`${s.docLabel}\``,
     `**${CFG.groupField?.name || "Group"}:** ${s.group}  ·  **Status:** ${s.status}`,
     "",
     "_Spec/content lives in the planning doc; this issue tracks status on the board._",
