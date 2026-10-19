@@ -225,7 +225,9 @@ function main() {
   }
 
   const items = fetchBoardItems(cfg);
-  const trackedItems = items.filter((it) => it.content?.type === "Issue");
+  // `Addresses #N` in a PR means #N in THIS repo. A board shared by several repos has colliding numbers,
+  // so only this repo's issues are eligible.
+  const trackedItems = items.filter((it) => it.content?.type === "Issue" && (it.content.repository || cfg.repo) === cfg.repo);
   const byNumber = new Map(trackedItems.map((it) => [it.content.number, it]));
   const targetRank = COLUMN_RANK[column];
 

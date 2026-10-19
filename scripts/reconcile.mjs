@@ -91,7 +91,33 @@ export function combineStatusMaps(maps) {
   return { map, conflicts };
 }
 
+// Index a board's issue items. A board can hold issues from SEVERAL repos, and issue numbers collide across
+// them — a doc's `Issue: #183` means #183 in the configured repo, never another repo's #183 that happens to be
+// on the same board. Only home-repo issues are joinable by number (and offered to the fuzzy matcher, whose
+// link step edits the issue in the home repo); markers are matched in any repo.
+export function indexBoardIssues(items, homeRepo) {
+  const projectIssues = items
+    .filter((it) => it.content?.type === "Issue")
+    .map((it) => {
+      const repo = it.content.repository || homeRepo;
+      const number = it.content.number;
+      return {
+        itemId: it.id,
+        number,
+        repo,
+        label: repo === homeRepo ? `#${number}` : `${repo}#${number}`,
+        title: it.content.title,
+        body: it.content.body,
+        status: it.status || null,
+      };
+    });
+  const home = projectIssues.filter((pi) => pi.repo === homeRepo);
+  return { projectIssues, home, byNumber: new Map(home.map((pi) => [pi.number, pi])) };
+}
+
 // Decide what this run would do about one story. Free of I/O so every branch can be asserted.
+const ref = (issue) => issue.label || `#${issue.number}`;
+
 export function decideAction({ story, linked, wantColumn, candidate, linkCandidates = false, cfg }) {
   const COLUMN_RANK = cfg.columnRank;
   if (linked) {
@@ -100,17 +126,17 @@ export function decideAction({ story, linked, wantColumn, candidate, linkCandida
     if (linked.status && !(linked.status in COLUMN_RANK)) {
       return {
         action: "hold",
-        detail: `#${linked.number} at "${linked.status}" (column not recognized — held; update "columnRank" if the board was renamed)`,
+        detail: `${ref(linked)} at "${linked.status}" (column not recognized — held; update "columnRank" if the board was renamed)`,
       };
     }
     const curRank = COLUMN_RANK[linked.status] ?? -1;
     if (curRank >= COLUMN_RANK[cfg.deployLine]) {
-      return { action: "hold", detail: `#${linked.number} at "${linked.status}" (past deploy line — event/manual owned)` };
+      return { action: "hold", detail: `${ref(linked)} at "${linked.status}" (past deploy line — event/manual owned)` };
     }
     if (wantColumn && linked.status !== wantColumn) {
-      return { action: "reconcile", detail: `#${linked.number} "${linked.status || "—"}" -> "${wantColumn}"` };
+      return { action: "reconcile", detail: `${ref(linked)} "${linked.status || "—"}" -> "${wantColumn}"` };
     }
-    return { action: "ok", detail: `#${linked.number} "${linked.status || "—"}"` };
+    return { action: "ok", detail: `${ref(linked)} "${linked.status || "—"}"` };
   }
 
   if (cfg.skipCreateStatus.includes(story.status)) {
@@ -205,16 +231,14 @@ function loadStoryFiles(source, statusMap, groupRe) {
 const findField = (fields, name) => fields.find((f) => f.name === name);
 const optionId = (field, name) => field?.options?.find((o) => o.name === name)?.id;
 
-function issueBodies(numbers) {
-  const map = new Map();
-  for (const n of numbers) {
-    try {
-      map.set(n, gh(["issue", "view", String(n), "--repo", CFG.repo, "--json", "body", "-q", ".body"]));
-    } catch {
-      map.set(n, "");
-    }
+// item-list usually carries the body; fall back to a per-issue fetch in the issue's OWN repo.
+function issueBody(pi) {
+  if (typeof pi.body === "string") return pi.body;
+  try {
+    return gh(["issue", "view", String(pi.number), "--repo", pi.repo, "--json", "body", "-q", ".body"]);
+  } catch {
+    return "";
   }
-  return map;
 }
 
 // ---- main -------------------------------------------------------------------
@@ -247,17 +271,13 @@ function main() {
   const items = fetchBoardItems(CFG);
   const projectId = fetchProjectId(CFG);
 
-  const projectIssues = items
-    .filter((it) => it.content?.type === "Issue")
-    .map((it) => ({ itemId: it.id, number: it.content.number, title: it.content.title, status: it.status || null }));
-  const bodies = issueBodies(projectIssues.map((i) => i.number));
+  const { projectIssues, home, byNumber } = indexBoardIssues(items, CFG.repo);
 
   const byMarker = new Map();
   for (const pi of projectIssues) {
-    const m = (bodies.get(pi.number) || "").match(MARKER_RE);
+    const m = issueBody(pi).match(MARKER_RE);
     if (m) byMarker.set(m[1], pi);
   }
-  const byNumber = new Map(projectIssues.map((pi) => [pi.number, pi]));
 
   const statusField = findField(fields, "Status");
   const groupField = CFG.groupField ? findField(fields, CFG.groupField.name) : null;
@@ -273,7 +293,7 @@ function main() {
     if (!linked && byMarker.has(s.syncId)) linked = byMarker.get(s.syncId);
     const wantColumn = CFG.statusToColumn[s.status] || null;
     // A map-only story has no authored title — matching on its slug would fabricate a link. Marker only.
-    const candidate = !linked && s.hasFile ? bestTitleMatch(s.title, projectIssues) : null;
+    const candidate = !linked && s.hasFile ? bestTitleMatch(s.title, home) : null;
     const { action, detail } = decideAction({ story: s, linked, wantColumn, candidate, linkCandidates: LINK_CANDIDATES, cfg: CFG });
     plan.push({ s, linked, wantColumn, candidate: candidate?.issue, action, detail });
   }

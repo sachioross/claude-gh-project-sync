@@ -1,7 +1,7 @@
 // Story enumeration and action resolution for reconcile.mjs.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mergeStories, decideAction, combineStatusMaps } from "../scripts/reconcile.mjs";
+import { mergeStories, decideAction, combineStatusMaps, indexBoardIssues } from "../scripts/reconcile.mjs";
 import { withDefaults } from "../scripts/lib.mjs";
 
 const cfg = withDefaults({ owner: "o", repo: "o/r", projectNumber: 6, projectTitle: "2026 H2", storyDir: "stories" });
@@ -123,5 +123,26 @@ describe("combineStatusMaps — several story trees, one board", () => {
       { id: "5-13-x", statuses: ["done", "review"] },
       { id: "7-4-y", statuses: ["superseded", "backlog"] },
     ]);
+  });
+});
+
+describe("indexBoardIssues — a board shared by several repos", () => {
+  const items = [
+    { id: "I1", status: "In Progress", content: { type: "Issue", number: 183, repository: "o/app", title: "Transcoding", body: "<!-- sync-id: 12-3-x -->" } },
+    { id: "I2", status: "Done", content: { type: "Issue", number: 183, repository: "o/api", title: "Log encryption", body: "" } },
+    { id: "I3", status: "Todo", content: { type: "DraftIssue", title: "draft" } },
+  ];
+  it("joins `Issue: #N` only to the home repo's #N, never a colliding number elsewhere", () => {
+    const { byNumber, projectIssues } = indexBoardIssues(items, "o/app");
+    assert.equal(byNumber.get(183).itemId, "I1");
+    assert.equal(projectIssues.length, 2);
+  });
+  it("labels foreign-repo issues with their repo", () => {
+    const { projectIssues } = indexBoardIssues(items, "o/app");
+    assert.deepEqual(projectIssues.map((p) => p.label), ["#183", "o/api#183"]);
+  });
+  it("names a foreign-repo link by its repo in the report", () => {
+    const linked = indexBoardIssues(items, "o/app").projectIssues[1];
+    assert.match(decide({ story: fileStory("23-9-x"), linked, wantColumn: "Todo" }).detail, /o\/api#183/);
   });
 });
