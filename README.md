@@ -14,7 +14,8 @@ column mapping, grouping field — is set in a per-repo `gh-project-sync.config.
    `<!-- sync-id: … -->` marker (mirrored as an `Issue: #N` line in the doc), creates/links issues, and
    reconciles the **Todo ↔ In progress** band from each doc's status. `--execute` to write.
 2. **Advancer** (`scripts/advance.mjs`) — event-driven. Fired by a GitHub Action on deploy success;
-   resolves which issues a merged PR references and advances them **forward only** to the deploy line.
+   resolves which issues a merged PR **claims to ship** and advances them **forward only** to the deploy
+   line. `--explain --pr <N>` previews a PR without writing.
 3. **The skill** (`skills/gh-project-sync/SKILL.md`) — the entry point + mental model (dual
    source-of-truth, ownership zones, the deploy-line high-water mark).
 
@@ -37,7 +38,7 @@ column mapping, grouping field — is set in a per-repo `gh-project-sync.config.
 
 (a local path — `/plugin marketplace add /path/to/claude-gh-project-sync` — also works for a checkout.)
 
-**Or vendor the scripts:** copy `scripts/*.mjs` into a target repo (e.g. `scripts/gh-project-sync/`) and
+**Or vendor the scripts:** copy all of `scripts/*.mjs` (both import `lib.mjs`) into a target repo (e.g. `scripts/gh-project-sync/`) and
 run them directly.
 
 ## Per-repo setup
@@ -50,6 +51,22 @@ run them directly.
    integration branch, and add a `PROJECTS_TOKEN` secret (project scope) for the auto-advance.
 
 See `skills/gh-project-sync/SKILL.md` for the full run guide.
+
+## PR keywords (what moves the board)
+
+| Keyword | Effect |
+|---|---|
+| `Addresses #N`, `Closes #N`, `Fixes #N`, `Resolves #N` | **Advances** #N to the deploy line on deploy |
+| `Refs #N`, `See #N`, `Related to #N` | Links only — never advances |
+| bare `#N`, or a keyword not directly against the number | Ignored |
+
+- `Addresses` is not a GitHub auto-close keyword: it moves the board without closing the issue.
+- Code spans and fenced blocks are ignored, so quoting `` `Addresses #N` `` is safe. Plain prose is not:
+  "…genuinely fixed #712" matches. Run `advance.mjs --explain --pr <N>` before merging when unsure
+  (exit 1 = something would advance).
+- A PR whose files are **all** under `planningOnlyPrefixes` never advances anything, whatever it says.
+- Roll-forward PRs: only the PR(s) on the deployed sha are read, so repeat the advancing keyword in a
+  fix-up PR when the original deploy failed.
 
 ## Provision to a team
 
@@ -91,10 +108,15 @@ Only `owner`, `repo`, `projectNumber`, `storyDir` are required. Notable optional
 | `statusToColumn` | BMAD map | Which doc status maps to which reconciler-managed column |
 | `columnRank` / `deployLine` | Todo…Done / "Deployed to Dev" | Column order + the high-water-mark boundary |
 | `skipCreateStatus` | `done`, `superseded` | Statuses that never get a forward-board issue |
-| `groupField` | `Epic` (from `^(\d+)-`) | Optional single-select grouping field derived from the id prefix |
+| `groupField` | none | Optional single-select grouping field (e.g. `Epic`, from `^(\d+)-`) |
+| `rollupPattern` | `^epic-\d+$` | Status-map keys that summarise children (never stories) |
+| `planningOnlyPrefixes` | `_bmad-output/`, `docs/` | A PR touching only these never advances the board |
+| `boardFetchLimit` | `2000` | Board page size; a full page fails the run instead of dropping the newest items |
 
 ## Requirements
 
 - `gh` CLI, authed with `project` scope.
-- Node 18+ (scripts are dependency-free ESM).
-- A GitHub Project (v2) with a **Status** single-select field whose option names match `columnRank`.
+- Node 18+ (scripts are dependency-free ESM). Tests: `npm test` (node:test, no install).
+- A GitHub Project (v2) with a **Status** single-select field whose option names match `columnRank`
+  **exactly**. The reconciler warns on a mismatch and HOLDS items in unknown columns; the advancer exits
+  non-zero. Renaming a board column means updating the config (and the workflow's `--column`).

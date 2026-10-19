@@ -11,7 +11,8 @@
 //   - Event-managed (NOT touched here): everything at/after the "deploy line" (e.g. Deployed to Dev,
 //     Ready for prod, Done). advance.mjs moves items to the deploy line on a deploy event; later
 //     columns are set manually. The reconciler NEVER pulls an item backward across the deploy line:
-//     once past it, that item is a high-water mark this script leaves alone.
+//     once past it, that item is a high-water mark this script leaves alone. An item in a column the
+//     config does not know is HELD too.
 //
 // DEFAULT = DRY RUN. Zero writes, prints a mapping report. Pass --execute to apply.
 //
@@ -23,56 +24,128 @@
 //   node <plugin>/scripts/reconcile.mjs --execute                # apply: create/link issues, reconcile status
 //   node <plugin>/scripts/reconcile.mjs --link-candidates --execute   # also auto-link fuzzy title matches
 
-import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync, writeFileSync, existsSync } from "node:fs";
-import { join, isAbsolute } from "node:path";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { loadConfig, gh, fetchBoardItems, fetchFields, fetchProjectId } from "./lib.mjs";
 
-// ---- config -----------------------------------------------------------------
-function loadConfig() {
-  const path = process.env.GH_PROJECT_SYNC_CONFIG || "gh-project-sync.config.json";
-  const abs = isAbsolute(path) ? path : join(process.cwd(), path);
-  if (!existsSync(abs)) {
-    console.error(`gh-project-sync: config not found at ${abs}`);
-    console.error("Create one from the plugin's templates/gh-project-sync.config.json (or set GH_PROJECT_SYNC_CONFIG).");
-    process.exit(1);
-  }
-  const c = JSON.parse(readFileSync(abs, "utf8"));
-  // sensible BMAD-shaped defaults for anything omitted
-  c.markerLabel = c.markerLabel || "sync-id";
-  c.knownStatus = c.knownStatus || ["backlog", "ready-for-dev", "in-progress", "review", "done", "superseded", "blocked"];
-  c.statusToColumn = c.statusToColumn || { backlog: "Todo", "ready-for-dev": "Todo", "in-progress": "In progress", review: "In progress" };
-  c.columnRank = c.columnRank || { Todo: 0, "In progress": 1, "Deployed to Dev": 2, "Ready for prod": 3, Done: 4 };
-  c.deployLine = c.deployLine || "Deployed to Dev";
-  c.skipCreateStatus = c.skipCreateStatus || ["done", "superseded"];
-  c.groupField = c.groupField || null; // e.g. { name: "Epic", labelPrefix: "Epic ", idPattern: "^(\\d+)-" }
-  for (const k of ["owner", "repo", "projectNumber", "storyDir"]) {
-    if (c[k] === undefined) { console.error(`gh-project-sync: config is missing required key "${k}"`); process.exit(1); }
-  }
-  c.sprintStatusFile = c.sprintStatusFile || null; // optional canonical status map (BMAD sprint-status.yaml)
-  c.projectTitle = c.projectTitle || `#${c.projectNumber}`;
-  return c;
+// ---- pure helpers (exported for tests) --------------------------------------
+
+// best-effort enum from a free-form `Status:` prose line (fallback only)
+export function normalizeProse(prose, knownStatus) {
+  if (!prose) return null;
+  const lead = prose.replace(/^[*_\s]+/, "").match(/^([a-z][a-z-]+)/i);
+  if (lead && knownStatus.has(lead[1].toLowerCase())) return lead[1].toLowerCase();
+  const p = prose.toLowerCase();
+  if (/\b(complete|done|shipped|merged)\b/.test(p)) return "done";
+  if (/\bsuperseded\b/.test(p)) return "superseded";
+  if (/\bblocked\b/.test(p)) return "blocked";
+  if (/\b(review|implemented|in-review|ready-for-review)\b/.test(p)) return "review";
+  if (/\bin-progress\b/.test(p)) return "in-progress";
+  if (/\bready-for-dev\b/.test(p)) return "ready-for-dev";
+  if (/\bbacklog\b/.test(p)) return "backlog";
+  return null;
 }
 
-const CFG = loadConfig();
-const KNOWN_STATUS = new Set(CFG.knownStatus);
-const STATUS_TO_COLUMN = CFG.statusToColumn;
-const COLUMN_RANK = CFG.columnRank;
-const DEPLOY_LINE = COLUMN_RANK[CFG.deployLine];
-const SKIP_CREATE_STATUS = new Set(CFG.skipCreateStatus);
-const GROUP_ID_RE = CFG.groupField?.idPattern ? new RegExp(CFG.groupField.idPattern) : /^(\d+)-/;
-
-const ARGS = new Set(process.argv.slice(2));
-const EXECUTE = ARGS.has("--execute");
-const LINK_CANDIDATES = ARGS.has("--link-candidates");
-
-const MARKER = (id) => `<!-- ${CFG.markerLabel}: ${id} -->`;
-const MARKER_RE = new RegExp(`<!--\\s*${CFG.markerLabel}:\\s*([^\\s]+)\\s*-->`);
-
-// ---- shell helpers ----------------------------------------------------------
-function gh(args, { json = false } = {}) {
-  const out = execFileSync("gh", args, { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
-  return json ? JSON.parse(out) : out.trim();
+// ⭐ THE ENUMERATION IS THE UNION OF DOC FILES AND STATUS-MAP KEYS — never just the files. With the map
+// used only as a lookup, an entry with no `<sync-id>.md` got no row, no warning and no count: the declared
+// source of truth could not put a story on the report. A map-only entry is a real story with no spec file
+// yet; once linked by its marker it reconciles like any other, unlinked it is reported as `unfiled`.
+// Roll-up keys (`epic-7: in-progress`) summarise their children and are skipped — they would otherwise be
+// permanent `unfiled` rows nobody can clear.
+export function mergeStories(fileStories, statusMap, { groupRe = /^(\d+)-/, rollupRe = null } = {}) {
+  const byId = new Map(fileStories.map((f) => [f.syncId, f]));
+  const merged = [...fileStories];
+  for (const [syncId, mapStatus] of statusMap) {
+    if (byId.has(syncId)) continue;
+    if (rollupRe && rollupRe.test(syncId)) continue;
+    merged.push({
+      syncId,
+      group: (syncId.match(groupRe) || [])[1] || "?",
+      title: syncId, // a report label only — never an issue title, never fed to the fuzzy matcher
+      status: mapStatus,
+      source: "map",
+      drift: null,
+      prose: "",
+      issue: null,
+      path: null,
+      hasFile: false,
+    });
+  }
+  return merged.sort((a, b) => a.syncId.localeCompare(b.syncId, undefined, { numeric: true }));
 }
+
+// Decide what this run would do about one story. Free of I/O so every branch can be asserted.
+export function decideAction({ story, linked, wantColumn, candidate, linkCandidates = false, cfg }) {
+  const COLUMN_RANK = cfg.columnRank;
+  if (linked) {
+    // ⭐ AN UNRECOGNIZED COLUMN IS HELD, NOT RECONCILED. Ranking it -1 treats "unknown position" as "the
+    // very beginning" — upstream, a renamed deploy column made this script ready to drag items BACKWARD.
+    if (linked.status && !(linked.status in COLUMN_RANK)) {
+      return {
+        action: "hold",
+        detail: `#${linked.number} at "${linked.status}" (column not recognized — held; update "columnRank" if the board was renamed)`,
+      };
+    }
+    const curRank = COLUMN_RANK[linked.status] ?? -1;
+    if (curRank >= COLUMN_RANK[cfg.deployLine]) {
+      return { action: "hold", detail: `#${linked.number} at "${linked.status}" (past deploy line — event/manual owned)` };
+    }
+    if (wantColumn && linked.status !== wantColumn) {
+      return { action: "reconcile", detail: `#${linked.number} "${linked.status || "—"}" -> "${wantColumn}"` };
+    }
+    return { action: "ok", detail: `#${linked.number} "${linked.status || "—"}"` };
+  }
+
+  if (cfg.skipCreateStatus.includes(story.status)) {
+    return { action: "skip", detail: `${story.status} (shipped/retired — not backfilled)` };
+  }
+
+  if (story.source === "none") {
+    // A doc nobody declared a status for is a supporting document in the story dir, not a story. Creating
+    // an issue would invent a status and park it on the board as unstarted work forever. Reported loudly.
+    return {
+      action: "untracked",
+      detail: "no status-map entry and no parseable Status: line — NOT a tracked story, no issue created",
+    };
+  }
+
+  if (!story.hasFile) {
+    // The mirror image of `untracked`: the status is real but there is no title or spec to create from.
+    return {
+      action: "unfiled",
+      detail: `no ${story.syncId}.md and no linked issue — no issue created (cures listed below the table)`,
+    };
+  }
+
+  if (candidate) {
+    return {
+      action: linkCandidates ? "link" : "review",
+      detail: `~ #${candidate.issue.number} "${candidate.issue.title}" (jaccard ${candidate.jac.toFixed(2)})`,
+    };
+  }
+  return { action: "create", detail: `new issue (${wantColumn || "Todo"})` };
+}
+
+// ---- fuzzy title match (advisory only; never auto-links unless --link-candidates) ----
+const norm = (s) => s.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").split(/\s+/).filter((w) => w.length > 2);
+function bestTitleMatch(storyTitle, issues) {
+  const a = new Set(norm(storyTitle));
+  let best = null;
+  for (const it of issues) {
+    const b = new Set(norm(it.title));
+    const inter = [...a].filter((w) => b.has(w)).length;
+    const jac = inter / (a.size + b.size - inter || 1);
+    if (!best || jac > best.jac) best = { issue: it, jac };
+  }
+  return best && best.jac >= 0.34 ? best : null;
+}
+
+// ---- I/O ----------------------------------------------------------------------
+let CFG;
+let KNOWN_STATUS;
+let MARKER;
+let MARKER_RE;
 
 // The optional sprint-status file is the CANONICAL machine-readable status source (a clean enum).
 // A doc's own `Status:` line is free-form prose, used only as an advisory fallback.
@@ -87,51 +160,24 @@ function loadSprintStatus() {
   return map;
 }
 
-// best-effort enum from a free-form `Status:` prose line (fallback only)
-function normalizeProse(prose) {
-  if (!prose) return null;
-  const lead = prose.replace(/^[*_\s]+/, "").match(/^([a-z][a-z-]+)/i);
-  if (lead && KNOWN_STATUS.has(lead[1].toLowerCase())) return lead[1].toLowerCase();
-  const p = prose.toLowerCase();
-  if (/\b(complete|done|shipped|merged)\b/.test(p)) return "done";
-  if (/\bsuperseded\b/.test(p)) return "superseded";
-  if (/\bblocked\b/.test(p)) return "blocked";
-  if (/\b(review|implemented|in-review|ready-for-review)\b/.test(p)) return "review";
-  if (/\bin-progress\b/.test(p)) return "in-progress";
-  if (/\bready-for-dev\b/.test(p)) return "ready-for-dev";
-  if (/\bbacklog\b/.test(p)) return "backlog";
-  return null;
-}
-
-// ---- read planning docs -----------------------------------------------------
-function loadStories() {
-  const sprint = loadSprintStatus();
+function loadStoryFiles(sprint, groupRe) {
   return readdirSync(CFG.storyDir)
     .filter((f) => f.endsWith(".md"))
     .map((f) => {
       const path = join(CFG.storyDir, f);
       const text = readFileSync(path, "utf8");
       const syncId = f.replace(/\.md$/, "");
-      const group = (syncId.match(GROUP_ID_RE) || [])[1] || "?";
+      const group = (syncId.match(groupRe) || [])[1] || "?";
       const title = (text.match(/^#\s+(.+)$/m) || [])[1]?.trim() || syncId;
       const prose = (text.match(/^Status:\s*(.+)$/m) || [])[1]?.trim() || "";
-      const proseStatus = normalizeProse(prose);
-      const yamlStatus = sprint.get(syncId) || null;
-      const status = yamlStatus || proseStatus || "unknown";
-      const source = yamlStatus ? "map" : proseStatus ? "doc" : "none";
-      const drift = yamlStatus && proseStatus && yamlStatus !== proseStatus ? `${yamlStatus}≠${proseStatus}` : null;
+      const proseStatus = normalizeProse(prose, KNOWN_STATUS);
+      const mapStatus = sprint.get(syncId) || null;
+      const status = mapStatus || proseStatus || "unknown";
+      const source = mapStatus ? "map" : proseStatus ? "doc" : "none";
+      const drift = mapStatus && proseStatus && mapStatus !== proseStatus ? `${mapStatus}≠${proseStatus}` : null;
       const issue = (text.match(/^Issue:\s*#?(\d+)/m) || [])[1];
-      return { syncId, group, title, status, source, drift, prose, issue: issue ? Number(issue) : null, path, text };
-    })
-    .sort((a, b) => a.syncId.localeCompare(b.syncId, undefined, { numeric: true }));
-}
-
-// ---- read the project -------------------------------------------------------
-function loadProject() {
-  const fields = gh(["project", "field-list", String(CFG.projectNumber), "--owner", CFG.owner, "--format", "json", "-L", "50"], { json: true }).fields;
-  const items = gh(["project", "item-list", String(CFG.projectNumber), "--owner", CFG.owner, "--format", "json", "-L", "500"], { json: true }).items;
-  const projectId = gh(["project", "view", String(CFG.projectNumber), "--owner", CFG.owner, "--format", "json"], { json: true }).id;
-  return { fields, items, projectId };
+      return { syncId, group, title, status, source, drift, prose, issue: issue ? Number(issue) : null, path, hasFile: true };
+    });
 }
 
 const findField = (fields, name) => fields.find((f) => f.name === name);
@@ -149,24 +195,23 @@ function issueBodies(numbers) {
   return map;
 }
 
-// ---- fuzzy title match (advisory only; never auto-links unless --link-candidates) ----
-const norm = (s) => s.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").split(/\s+/).filter((w) => w.length > 2);
-function bestTitleMatch(storyTitle, issues) {
-  const a = new Set(norm(storyTitle));
-  let best = null;
-  for (const it of issues) {
-    const b = new Set(norm(it.title));
-    const inter = [...a].filter((w) => b.has(w)).length;
-    const jac = inter / (a.size + b.size - inter || 1);
-    if (!best || jac > best.jac) best = { issue: it, jac };
-  }
-  return best && best.jac >= 0.34 ? best : null;
-}
-
 // ---- main -------------------------------------------------------------------
 function main() {
-  const stories = loadStories();
-  const { fields, items, projectId } = loadProject();
+  CFG = loadConfig(["owner", "repo", "projectNumber", "storyDir"]);
+  KNOWN_STATUS = new Set(CFG.knownStatus);
+  MARKER = (id) => `<!-- ${CFG.markerLabel}: ${id} -->`;
+  MARKER_RE = new RegExp(`<!--\\s*${CFG.markerLabel}:\\s*([^\\s]+)\\s*-->`);
+  const groupRe = CFG.groupField?.idPattern ? new RegExp(CFG.groupField.idPattern) : /^(\d+)-/;
+  const rollupRe = CFG.rollupPattern ? new RegExp(CFG.rollupPattern) : null;
+  const args = new Set(process.argv.slice(2));
+  const EXECUTE = args.has("--execute");
+  const LINK_CANDIDATES = args.has("--link-candidates");
+
+  const sprint = loadSprintStatus();
+  const stories = mergeStories(loadStoryFiles(sprint, groupRe), sprint, { groupRe, rollupRe });
+  const fields = fetchFields(CFG);
+  const items = fetchBoardItems(CFG);
+  const projectId = fetchProjectId(CFG);
 
   const projectIssues = items
     .filter((it) => it.content?.type === "Issue")
@@ -183,36 +228,20 @@ function main() {
   const statusField = findField(fields, "Status");
   const groupField = CFG.groupField ? findField(fields, CFG.groupField.name) : null;
 
+  // The board's own column names, checked against the config once, up front — a mismatch otherwise
+  // shows only as a column of HOLD rows.
+  const boardColumns = new Set((statusField?.options || []).map((o) => o.name));
+  const missingColumns = Object.keys(CFG.columnRank).filter((c) => !boardColumns.has(c));
+
   const plan = [];
   for (const s of stories) {
     let linked = s.issue ? byNumber.get(s.issue) : null;
     if (!linked && byMarker.has(s.syncId)) linked = byMarker.get(s.syncId);
-
-    const wantColumn = STATUS_TO_COLUMN[s.status] || null;
-
-    let action, detail;
-    if (linked) {
-      const curRank = COLUMN_RANK[linked.status] ?? -1;
-      if (curRank >= DEPLOY_LINE) {
-        action = "hold"; detail = `#${linked.number} at "${linked.status}" (past deploy line — event/manual owned)`;
-      } else if (wantColumn && linked.status !== wantColumn) {
-        action = "reconcile"; detail = `#${linked.number} "${linked.status || "—"}" -> "${wantColumn}"`;
-      } else {
-        action = "ok"; detail = `#${linked.number} "${linked.status || "—"}"`;
-      }
-    } else if (SKIP_CREATE_STATUS.has(s.status)) {
-      action = "skip"; detail = `${s.status} (shipped/retired — not backfilled)`;
-    } else {
-      const cand = bestTitleMatch(s.title, projectIssues);
-      if (cand) {
-        action = LINK_CANDIDATES ? "link" : "review";
-        detail = `~ #${cand.issue.number} "${cand.issue.title}" (jaccard ${cand.jac.toFixed(2)})`;
-        s._candidate = cand.issue;
-      } else {
-        action = "create"; detail = `new issue (${wantColumn || "Todo"})`;
-      }
-    }
-    plan.push({ s, linked, wantColumn, action, detail });
+    const wantColumn = CFG.statusToColumn[s.status] || null;
+    // A map-only story has no authored title — matching on its slug would fabricate a link. Marker only.
+    const candidate = !linked && s.hasFile ? bestTitleMatch(s.title, projectIssues) : null;
+    const { action, detail } = decideAction({ story: s, linked, wantColumn, candidate, linkCandidates: LINK_CANDIDATES, cfg: CFG });
+    plan.push({ s, linked, wantColumn, candidate: candidate?.issue, action, detail });
   }
 
   // ---- report ----
@@ -231,6 +260,25 @@ function main() {
   console.log("-".repeat(120));
   console.log("summary:", Object.entries(counts).map(([k, v]) => `${k}=${v}`).join("  "));
   if (drifts.length) console.log(`drift (map≠doc prose): ${drifts.join(", ")}`);
+  const unfiled = plan.filter((p) => p.action === "unfiled").map((p) => p.s.syncId);
+  if (unfiled.length) {
+    console.log(`\nunfiled (${unfiled.length}) — in the status map, no doc, no linked issue: ${unfiled.join(", ")}`);
+    console.log(
+      `  NOT on the board. Write ${CFG.storyDir}/<id>.md, or file the issue on "${CFG.projectTitle}" with ` +
+        `<!-- ${CFG.markerLabel}: <id> --> in its body.`,
+    );
+  }
+  const untracked = plan.filter((p) => p.action === "untracked").map((p) => p.s.syncId);
+  if (untracked.length) {
+    console.log(`\nuntracked (${untracked.length}) — docs with no status: ${untracked.join(", ")}`);
+    console.log("  If one is really a story, add it to the status map.");
+  }
+  if (missingColumns.length) {
+    console.log(
+      `\n⚠️ columnRank names ${missingColumns.map((c) => `"${c}"`).join(", ")} but the board's Status options are ` +
+        `${[...boardColumns].map((c) => `"${c}"`).join(", ") || "(none)"}. Fix gh-project-sync.config.json.`,
+    );
+  }
   if (CFG.groupField && !groupField) console.log(`note: project has no "${CFG.groupField.name}" field yet — --execute will create it.`);
 
   if (!EXECUTE) {
@@ -239,32 +287,34 @@ function main() {
   }
 
   // ---- execute ----
-  const grp = CFG.groupField ? ensureGroupField(fields, groupField, stories) : null;
+  const grp = CFG.groupField ? ensureGroupField(groupField, stories) : null;
   for (const p of plan) {
     if (p.action === "create") doCreate(p, projectId, statusField, grp);
     else if (p.action === "reconcile") setStatus(projectId, p.linked.itemId, statusField, p.wantColumn);
-    else if (p.action === "link") doLink(p, p.s._candidate);
+    else if (p.action === "link") doLink(p, p.candidate);
   }
   console.log("\nExecute complete.");
 }
 
 // create the grouping single-select field (e.g. "Epic") if missing; return its field object
-function ensureGroupField(fields, groupField, stories) {
+function ensureGroupField(groupField, stories) {
   let field = groupField;
   const groups = [...new Set(stories.map((s) => s.group))].filter((e) => e !== "?").sort();
   if (!field) {
     const opts = groups.map((e) => `${CFG.groupField.labelPrefix || ""}${e}`).join(",");
     gh(["project", "field-create", String(CFG.projectNumber), "--owner", CFG.owner, "--name", CFG.groupField.name, "--data-type", "SINGLE_SELECT", "--single-select-options", opts]);
     console.log(`created "${CFG.groupField.name}" field with options: ${opts}`);
-    const refreshed = gh(["project", "field-list", String(CFG.projectNumber), "--owner", CFG.owner, "--format", "json", "-L", "50"], { json: true }).fields;
-    field = findField(refreshed, CFG.groupField.name);
+    field = findField(fetchFields(CFG), CFG.groupField.name);
   }
   return field;
 }
 
 function setStatus(projectId, itemId, statusField, columnName) {
   const opt = optionId(statusField, columnName);
-  if (!opt) return;
+  if (!opt) {
+    console.warn(`  Status option "${columnName}" not on the board — item ${itemId} left unchanged.`);
+    return;
+  }
   gh(["project", "item-edit", "--project-id", projectId, "--id", itemId, "--field-id", statusField.id, "--single-select-option-id", opt]);
   console.log(`  set Status="${columnName}" on item ${itemId}`);
 }
@@ -288,14 +338,15 @@ function addToProject(url, number) {
     if (!/already exists in this project/i.test(String(err.stderr || err.message || ""))) throw err;
     console.log(`  note: #${number} was already on the board (project auto-add) — resolving its item id`);
   }
-  const items = gh(["project", "item-list", String(CFG.projectNumber), "--owner", CFG.owner, "--format", "json", "-L", "500"], { json: true }).items;
-  const found = items.find((it) => it.content?.type === "Issue" && it.content.number === number);
+  const found = fetchBoardItems(CFG).find((it) => it.content?.type === "Issue" && it.content.number === number);
   if (!found?.id) throw new Error(`#${number} was neither added to nor found in project ${CFG.projectNumber}`);
   return found.id;
 }
 
 function doCreate(p, projectId, statusField, groupField) {
   const s = p.s;
+  // decideAction routes a fileless story to `unfiled`; fail loudly if that ever regresses.
+  if (!s.hasFile) throw new Error(`refusing to create an issue for ${s.syncId}: no doc to title it from`);
   const body = [
     MARKER(s.syncId),
     "",
@@ -328,6 +379,10 @@ function doLink(p, issue) {
 
 // insert/replace the `Issue: #N` header line in the doc (right after the Status: line)
 function writeIssueLine(story, number) {
+  if (!story.path || !existsSync(story.path)) {
+    console.log(`  note: ${story.syncId} has no doc — #${number} is linked by its ${CFG.markerLabel} marker only`);
+    return;
+  }
   let text = readFileSync(story.path, "utf8");
   if (/^Issue:\s*#?\d+/m.test(text)) {
     text = text.replace(/^Issue:\s*#?\d+.*$/m, `Issue: #${number}`);
@@ -340,4 +395,5 @@ function writeIssueLine(story, number) {
   writeFileSync(story.path, text);
 }
 
-main();
+// Only run when invoked as a script — lets tests import the pure helpers above.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();

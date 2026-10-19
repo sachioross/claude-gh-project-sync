@@ -22,5 +22,9 @@
   "deployLine": "Deployed to Dev",
   "skipCreateStatus": ["done", "superseded"],
 
-  "groupField": { "name": "Epic", "labelPrefix": "Epic ", "idPattern": "^(\\d+)-" }
+  "groupField": { "name": "Epic", "labelPrefix": "Epic ", "idPattern": "^(\\d+)-" },
+
+  "rollupPattern": "^epic-\\d+$",
+  "planningOnlyPrefixes": ["_bmad-output/", "docs/"],
+  "boardFetchLimit": 2000
 }

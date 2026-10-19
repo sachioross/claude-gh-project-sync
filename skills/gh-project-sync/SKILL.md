@@ -54,7 +54,10 @@ Run from the target repo root. `<plugin>` = this plugin's root (`${CLAUDE_PLUGIN
    ```
    Read the report: `CREATE` = new issue, `RECONCILE` = Status change, `OK` = already in sync,
    `SKIP` = shipped/retired, `REVIEW` = a fuzzy title match to an existing issue (not auto-linked),
-   `HOLD` = past the deploy line. Note any `drift (map≠doc prose)` — that flags a status entry to fix.
+   `HOLD` = past the deploy line, or in a column the config doesn't know. `UNFILED` = in the status map
+   but no doc and no linked issue (never auto-created — write the doc, or file the issue with the marker).
+   `UNTRACKED` = a doc with no status (not a story; add it to the map if it is). Note any
+   `drift (map≠doc prose)` — that flags a status entry to fix — and any `columnRank` mismatch warning.
 
 2. **Apply**:
    ```
@@ -69,6 +72,17 @@ Run from the target repo root. `<plugin>` = this plugin's root (`${CLAUDE_PLUGIN
 Tip: wire these as `npm` scripts in the target repo (`"sync": "node .../reconcile.mjs"`,
 `"sync:apply": "node .../reconcile.mjs --execute"`) for a shorter invocation.
 
+## PR wording (for the deploy auto-advance)
+
+- `Addresses #N` (or `Closes`/`Fixes`/`Resolves #N`) = this PR ships #N → advanced on deploy.
+- `Refs #N` / `See #N` / `Related to #N` = linked only, never advanced.
+- A PR touching only `planningOnlyPrefixes` (default `_bmad-output/`, `docs/`) never advances anything.
+- Advancing keywords in ordinary prose still match ("…fixed #712"). Preview before merging:
+  `REPO_TOKEN=… node <plugin>/scripts/advance.mjs --explain --pr <N>` (or just with an authed `gh`).
+- The advance cannot tell a partial ship from a complete one — after a deploy carrying half a story,
+  walk the board item back by hand.
+- If the board has an "Auto-close issue" workflow, setting Status = Done CLOSES the issue.
+
 ## When creating a NEW doc that should land on the board
 
 Add its `sync-id` (filename stem) to the status map with the right status, then run the apply command —
@@ -80,4 +94,5 @@ other way (an existing project issue → a new doc), scaffold the doc, then the 
 
 - `scripts/reconcile.mjs` — the reconciler (Todo ↔ In progress band). Dependency-free; shells out to `gh`.
 - `scripts/advance.mjs` — the event-driven advancer (→ deploy line), invoked by the GitHub Action.
+- `scripts/lib.mjs` — shared config loading, `gh` shell-out, and the board fetch (with the full-page check).
 - All BMAD/repo-specific values live in `gh-project-sync.config.json` in the target repo.

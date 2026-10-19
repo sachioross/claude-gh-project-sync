@@ -4,14 +4,24 @@
 # manages the Todo <-> In progress band; this workflow advances items to the deploy line
 # ("Deployed to Dev") when your deploy workflow succeeds on the integration branch.
 #
+# Only ADVANCING keywords move an item: `Addresses #N` (or Closes/Fixes/Resolves #N). `Refs #N` links
+# without moving. Check a PR before merging with: node <advance.mjs> --explain --pr <N>
+#
 # Later columns ("Ready for prod", "Done") are set MANUALLY — a deliberate release signal.
 # Items advance FORWARD only (never moved back).
 #
-# EDIT THE 3 PLACEHOLDERS below: <deploy-workflow-name>, <integration-branch>, and the path to
-# advance.mjs (vendor the script into the repo, or install this plugin on the runner).
+# EDIT THE PLACEHOLDERS below: <deploy-workflow-name>, <integration-branch>, the --column name (must
+# match a board Status option exactly), and the path to advance.mjs (vendor scripts/*.mjs — advance.mjs
+# imports lib.mjs — or install this plugin on the runner).
 #
-# REQUIRES a repo/org secret PROJECTS_TOKEN — a token with `project` scope. The default GITHUB_TOKEN
-# cannot write org Projects v2, so without this secret the advance step is a safe no-op.
+# ⚠️ `workflow_run` only runs the DEFAULT branch's copy of this file and of the script it calls. A change
+# merged to the integration branch is inert until it reaches the default branch.
+#
+# TWO TOKENS, deliberately:
+#   GH_TOKEN   = secrets.PROJECTS_TOKEN — `project` scope; the default GITHUB_TOKEN cannot write org
+#                Projects v2. Without this secret the advance step is a safe no-op.
+#   REPO_TOKEN = secrets.GITHUB_TOKEN   — resolves the merged PR and its files. PROJECTS_TOKEN may not
+#                read a private repo, and GitHub answers 404 for that rather than 403.
 
 name: Project Sync
 
@@ -22,6 +32,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read # lets REPO_TOKEN resolve the PR behind the deployed sha
 
 jobs:
   advance:
@@ -30,12 +41,13 @@ jobs:
       github.event.workflow_run.head_branch == '<integration-branch>'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version: "24"
       - name: Advance linked issues -> Deployed to Dev
         env:
           GH_TOKEN: ${{ secrets.PROJECTS_TOKEN }}
+          REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # Point this at wherever advance.mjs lives (vendored path shown):
         run: node scripts/gh-project-sync/advance.mjs --column "Deployed to Dev" --sha "${{ github.event.workflow_run.head_sha }}"
